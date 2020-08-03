@@ -49,15 +49,22 @@ let redeem_code = true;
 //// IdP endpoints - add "127.0.0.1 poc.local" to your /etc/hosts file!
 let authEndpoint = "https://poc.local:3001/auth";
 let tokenEndpoint = "https://poc.local:3001/token";
+let userinfoEndpoint = "https://poc.local:3001/userinfo"
 
 //// SP endpoints
-const landingEndpoint = "https://poc.local:4001";
-const startFlowEndpoint = "https://poc.local:4001/start";
-const redirectUriEndpoint = "https://poc.local:4001/callback";
-const useCodeEndpoint = "https://poc.local:4001/use_code";
-const getCodeEndpoint = "https://poc.local:4001/get_code";
-const jwksEndpoint = "https://poc.local:4001/jwks";
-const configurationEndpoint = "https://poc.local:4001/configure";
+// Security feature: If the SP is exposed to the internet, third parties can gather sensitive information on endpoints => introduce secret path prefix TODO: generate new prefix using SHA256(secret)
+const path_prefix = "";
+//// endpoints - add "127.0.0.1 poc.local" to your /etc/hosts file!
+const host = "https://poc.local:4001";
+const landingEndpoint = host;
+const startFlowEndpoint = `${host}${path_prefix}/start`;
+const redirectUriEndpoint = `${host}${path_prefix}/callback`;
+const useCodeEndpoint = `${host}${path_prefix}/use_code`;
+const getCodeEndpoint = `${host}${path_prefix}/get_code`;
+const useAccessTokenEndpoint = `${host}${path_prefix}/use_access_token`;
+const jwksEndpoint = `${host}${path_prefix}/jwks`;
+const configurationEndpoint = `${host}${path_prefix}/configure`;
+const logEndpoint = `${host}${path_prefix}/log`;
 
 //// client authentication and credentials
 let client_id = "test.local";
@@ -125,6 +132,8 @@ let code = "";
 let access_token = "";
 let refresh_token = "";
 let id_token = "";
+let id_token_decoded = "";
+let userinfoResponseRaw = "";
 
 /////////////////////////////////////////////////////////////////////////////////////////
 //// Request & Response Templates ///////////////////////////////////////////////////////
@@ -185,18 +194,16 @@ function callbackResponse() {
     <li>access_token: ${access_token}</li>
     <li>refresh_token: ${refresh_token}</li>
     <li>id_token: ${id_token}</li>
+    <li>id_token (decoded): <pre><code>${JSON.stringify(id_token_decoded, null, 4)}</pre></code></li>
   </ul>
 
   Possible actions:
   <ul>
     <li>Redeem (reuse) the above listed code: <a href="${useCodeEndpoint}">${useCodeEndpoint}</a></li>
+    <li>Redeem the obtained access_token: <a href="${useAccessTokenEndpoint}">${useAccessTokenEndpoint}</a></li>
     <li>Get a fresh code without redeeming it: <a href="${getCodeEndpoint}">${getCodeEndpoint}</a></li>
     <li>Start a new flow and redeem another fresh code: <a href="${startFlowEndpoint}">${startFlowEndpoint}</a></li>
   </ul>
-
-  No User interaction Demo: 
-  <button onclick="document.body.innerHTML=document.body.innerHTML+'<iframe src=/get_code></iframe><br>'">Click!</button>
-  Explanation: We add an iFrame to the DOM using JavaScript. This could be done completely without user interaction, but for Demo purposes we do this "on click". <br><br>
   `;
 }
 function callbackResponse_unsend() {
@@ -211,6 +218,25 @@ function callbackResponse_unsend() {
   Possible actions:
   <ul>
     <li>Redeem the above listed code: <a href="${useCodeEndpoint}">${useCodeEndpoint}</a></li>
+    <li>Redeem the last known access_token again: <a href="${useAccessTokenEndpoint}">${useAccessTokenEndpoint}</a></li>
+    <li>Get a fresh code without redeeming it: <a href="${getCodeEndpoint}">${getCodeEndpoint}</a></li>
+    <li>Start a new flow and redeem another fresh code: <a href="${startFlowEndpoint}">${startFlowEndpoint}</a></li>
+  </ul>
+  `;
+}
+function userinfoResponse() {
+  return `
+  <h1>OIDC access_token used</h1>
+
+  We used the <i>access_token</i> to query the userinfo endpoint and received the following data: 
+  <ul>
+    <li>userinfo:<pre><code>${JSON.stringify(userinfoResponseRaw, null, 4)}</pre></code></li>
+  </ul>
+
+  Possible actions:
+  <ul>
+    <li>Redeem the last known code: <a href="${useCodeEndpoint}">${useCodeEndpoint}</a></li>
+    <li>Redeem the access_token again: <a href="${useAccessTokenEndpoint}">${useAccessTokenEndpoint}</a></li>
     <li>Get a fresh code without redeeming it: <a href="${getCodeEndpoint}">${getCodeEndpoint}</a></li>
     <li>Start a new flow and redeem another fresh code: <a href="${startFlowEndpoint}">${startFlowEndpoint}</a></li>
   </ul>
@@ -240,14 +266,14 @@ function tokenRequest() {
 /////////////////////////////////////////////////////////////////////////////////////////
 
 // landing page
-app.get("/", function (req, res) {
+app.get(path_prefix+"/", function (req, res) {
   console.log(`  [${req.ip}] landing page`);
   
   res.send(landingPage);
 });
 
 // start endpoint - this endpoint has intentionally no CSRF protection
-app.get("/start", function (req, res) {
+app.get(path_prefix+"/start", function (req, res) {
   console.log(`  [${req.ip}] start OIDC flow`);
 
   let redirect_uri = new URL(authEndpoint);
@@ -259,6 +285,11 @@ app.get("/start", function (req, res) {
   params.append("client_id", client_id);
   params.append("redirect_uri", redirectUriEndpoint);
 
+  // Optional: Test for SSRF
+  //params.append("request_uri", logEndpoint);
+  // Optional: Test if request object is parsed (submit junk, should trigger error if parsed)
+  //params.append("request", "junk123");
+  
   let redirect_target = redirect_uri + "?" + params.toString();
   console.log(`      [*] Redirect target: ${redirect_target}`);
 
@@ -267,7 +298,7 @@ app.get("/start", function (req, res) {
 
 let tokenResponse_chunks;
 // redirect_uri endpoint
-app.get("/callback", function (req, res) {
+app.get(path_prefix+"/callback", function (req, res) {
   console.log(`  [${req.ip}] redirect_uri endpoint`);
 
   code = req.query.code;
@@ -284,7 +315,7 @@ app.get("/callback", function (req, res) {
     } else {
       options = {host: tokenEndpointObject.hostname, port: tokenEndpointObject.port, path: tokenEndpointObject.pathname, method: "POST", headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) } };
     }
-    console.log(`      [*] Request to be sent:\n        [-] Header: ${JSON.stringify(options)}\n        [-] Body: ${JSON.stringify(data)}`);
+    console.log(`      [*] Request to be sent:\n        [-] Header: ${JSON.stringify(options, null, 4)}\n        [-] Body: ${JSON.stringify(data, null, 4)}`);
     try {
       // important: determine if SP uses http or https
       let dummy = https;
@@ -299,11 +330,13 @@ app.get("/callback", function (req, res) {
         });
         response.on('end', function() {
           console.log(`      [*] Received data: ${tokenResponse_chunks}`);
+          console.log(`      [*] Response headers: ${JSON.stringify(response.headers, null, 4)}`);
           //console.dir(response);
           let tokenResponse = JSON.parse(tokenResponse_chunks);
           access_token = tokenResponse.access_token;
           refresh_token = tokenResponse.refresh_token;
           id_token = tokenResponse.id_token;
+          id_token_decoded = jwt.decode(id_token, {complete: true});
 
           res.send(callbackResponse());
         })
@@ -320,15 +353,15 @@ app.get("/callback", function (req, res) {
 });
 
 // jwks endpoint
-app.get("/jwks", function (req, res) {
+app.get(path_prefix+"/jwks", function (req, res) {
   console.log(`  [${req.ip}] jwks endpoint`);
-  console.log(`      [*] Data to be sent: ${JSON.stringify(jwksResponse)}`);
+  console.log(`      [*] Data to be sent: ${JSON.stringify(jwksResponse, null, 4)}`);
 
   res.json(jwksResponse);
 });
 
 // use_code endpoint - uses the currently known code to redeem a new access_token and id_token
-app.get("/use_code", function (req, res) {
+app.get(path_prefix+"/use_code", function (req, res) {
   console.log(`  [${req.ip}] use_code endpoint`);
   tokenResponse_chunks = "";
 
@@ -343,7 +376,7 @@ app.get("/use_code", function (req, res) {
   } else {
     options = {host: tokenEndpointObject.hostname, port: tokenEndpointObject.port, path: tokenEndpointObject.pathname, method: "POST", headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) } };
    }
-  console.log(`      [*] Request to be sent:\n        [-] Header: ${JSON.stringify(options)}\n        [-] Body: ${JSON.stringify(data)}`);
+  console.log(`      [*] Request to be sent:\n        [-] Header: ${JSON.stringify(options, null, 4)}\n        [-] Body: ${JSON.stringify(data, null, 4)}`);
   try {
     // important: determine if SP uses http or https
     let dummy = https;
@@ -357,11 +390,13 @@ app.get("/use_code", function (req, res) {
       });
       response.on('end', function() {
         console.log(`      [*] Received response body: ${tokenResponse_chunks}`);
+        console.log(`      [*] Response headers: ${JSON.stringify(response.headers, null, 4)}`);
        
         let tokenResponse = JSON.parse(tokenResponse_chunks);
         access_token = tokenResponse.access_token;
         refresh_token = tokenResponse.refresh_token;
         id_token = tokenResponse.id_token;
+        id_token_decoded = jwt.decode(id_token, {complete: true});
       
         res.send(callbackResponse());
       })
@@ -373,8 +408,46 @@ app.get("/use_code", function (req, res) {
   }
 });
 
+let userinfoResponse_chunks = "";
+// userinfo endpoint - uses the currently known access_token to get userinfo
+app.get(path_prefix+"/use_access_token", function (req, res) {
+  console.log(`  [${req.ip}] userinfo endpoint`);
+  userinfoResponse_chunks = "";
+    
+  // send token request
+  let userinfoEndpointObject = new URL(userinfoEndpoint);
+  // we use the access_token as Bearer token
+  let options = {host: userinfoEndpointObject.hostname, port: userinfoEndpointObject.port, path: userinfoEndpointObject.pathname, method: "POST", headers: {"Authorization": `Bearer ${access_token}` } };
+
+  console.log(`      [*] Request to be sent:\n        [-] Header: ${JSON.stringify(options, null, 4)}`);
+  try {
+    // important: determine if SP uses http or https
+    let dummy = https;
+    if(userinfoEndpointObject.protocol == "http:") dummy = http;
+
+    let httpreq = dummy.request(options, function (response) {
+      response.setEncoding('utf8');
+      response.on('data', function (chunk) {
+        userinfoResponse_chunks += chunk;
+        console.log(`      [*] Received chunk: ${chunk}`);
+      });
+      response.on('end', function() {
+        console.log(`      [*] Received response body: ${userinfoResponse_chunks}`);
+       
+        userinfoResponseRaw = JSON.parse(userinfoResponse_chunks);
+
+        res.send(userinfoResponse());
+      })
+    });
+    httpreq.end();
+  } catch(e) {
+    res.send(`Whooops, that did not work... Something went wrong on Userinfo Request :(<br><br><pre>${e}`);
+    console.dir(e);
+  }
+});
+
 // get_code endpoint - starts a new login_flow but does not redeem the newly obtained fresh code
-app.get("/get_code", function (req, res) {
+app.get(path_prefix+"/get_code", function (req, res) {
   console.log(`  [${req.ip}] get_code endpoint`);
   redeem_code = false;
 
@@ -382,13 +455,13 @@ app.get("/get_code", function (req, res) {
 });
 
 // Adjust configuration Endpoint - configure client_id and client_secret
-app.get("/configure", function (req, res) {
+app.get(path_prefix+"/configure", function (req, res) {
   console.log(`  [${req.ip}] configure endpoint (GET)`);
 
   res.send(configurePage());
 });
 
-app.post("/configure", function (req, res) {
+app.post(path_prefix+"/configure", function (req, res) {
   console.log(`  [${req.ip}] configure endpoint (POST)`);
 
   client_id = req.body.client_id;
@@ -397,6 +470,15 @@ app.post("/configure", function (req, res) {
   tokenEndpoint = req.body.token_endpoint;
 
   res.redirect(301, landingEndpoint);
+});
+
+// log endpoint - logs request
+app.get(path_prefix+"/log", function (req, res) {
+  console.log(`\n  [${req.ip}] log endpoint`);
+  console.log("      [+] Request:");
+  console.dir(req);
+  
+  res.json(req.headers);
 });
 
 /////////////////////////////////////////////////////////////////////////////////////////
