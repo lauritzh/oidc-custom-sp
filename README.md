@@ -17,3 +17,11 @@ user@laptop:/oidc-custom-sp$ node sp.js
 
 You may add "127.0.0.1 poc.local" to your `/etc/hosts`-file, so that you can reach the SP at https://poc.local:4001/
 
+## Intercepting Proxy
+By using the [global-agent](https://github.com/gajus/global-agent) Node.js module, it is possible to intercept the backend traffic such as the *Token Request* and *Userinfo Request*:
+
+```bash
+$ npm i global-agent
+$ export GLOBAL_AGENT_HTTP_PROXY=http://127.0.0.1:8080
+$ node -r 'global-agent/bootstrap' sp.js 
+```
